@@ -1,0 +1,7 @@
+fastapi
+uvicorn
+redis
+pandas
+mlflow
+kafka-python
+requests
