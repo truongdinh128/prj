@@ -127,18 +127,36 @@ Output:
 
 ## 4. Kiến trúc logic
 
-```
-[Data Source]
-      ↓
-[Ingestion] → Kafka → [Stream Processing] → Redis
-                          ↓
-                       Predict
-                          ↓
-                      FastAPI
-                          ↓
-                      User/API
+graph TD
+    %% Global Components
+    subgraph Data_Flow [Luồng Dữ Liệu Tổng Thể]
+        Source[Crypto WS/API] --> Ingestion[Ingestion Service]
+        Ingestion --> Kafka{Kafka Message Bus}
+    end
 
-Kafka → Storage → Training → MLflow → Serving
+    %% Real-time Path
+    subgraph RealTime_Path [Luồng Real-time]
+        Kafka --> Stream[Stream Processing]
+        Stream --> Redis[(Redis Online Store)]
+        Redis --> Serving[Serving Service FastAPI]
+        Serving --> Dashboard[API/Dashboard]
+    end
 
-Monitoring → Trigger Training
-```
+    %% Batch & Training Path
+    subgraph Batch_Path [Luồng Batch & Training]
+        Kafka --> Storage[(PostgreSQL/Parquet)]
+        Storage --> Training[Training Service]
+        Training --> MLflow[MLflow Model Registry]
+        MLflow --> Serving
+    end
+
+    %% Feedback Loop
+    subgraph Feedback_Loop [Vòng lặp Phản hồi]
+        Serving --> Monitoring[Monitoring Service]
+        Actual[Actual Data] --> Monitoring
+        Monitoring -- Detect Drift --> Training
+    end
+
+    %% Tech Stack Annotations
+    classDef tech fill:#f9f,stroke:#333,stroke-width:2px;
+    class Ingestion,Stream,Training,Serving,Monitoring tech

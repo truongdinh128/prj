@@ -29,4 +29,4 @@ while True:
     except Exception as e:
         print("Network error:", e)
 
-    time.sleep(45)
+    time.sleep(15)
