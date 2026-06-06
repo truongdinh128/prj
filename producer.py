@@ -1,32 +1,57 @@
-import time
 import json
+import os
+import time
+
 import requests
 from kafka import KafkaProducer
 
+
+BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
+TOPIC_NAME = os.getenv("KAFKA_TOPIC", "btc_price")
+POLL_INTERVAL_SECONDS = int(os.getenv("POLL_INTERVAL_SECONDS", "5"))
+SOURCE_URL = os.getenv("PRICE_SOURCE_URL", "https://api.coingecko.com/api/v3/simple/price")
+
+
 producer = KafkaProducer(
-    bootstrap_servers='localhost:9092',
-    value_serializer=lambda v: json.dumps(v).encode('utf-8')
+    bootstrap_servers=BOOTSTRAP_SERVERS,
+    value_serializer=lambda value: json.dumps(value).encode("utf-8"),
 )
 
-url = "https://api.coingecko.com/api/v3/simple/price"
 
-while True:
-    try:
-        response = requests.get(url, params={
-            "ids": "bitcoin",
-            "vs_currencies": "usd"
-        })
-        
-        data = response.json()
+def fetch_price() -> float:
+    response = requests.get(
+        SOURCE_URL,
+        params={"ids": "bitcoin", "vs_currencies": "usd"},
+        timeout=2,
+    )
+    response.raise_for_status()
 
-        if "bitcoin" in data:
-            price = data["bitcoin"]["usd"]
-            producer.send("btc_price", {"price": price})
-            print("Sent:", price)
-        else:
-            print("Error: API limit reached or invalid response.", data)
+    data = response.json()
+    bitcoin = data.get("bitcoin")
+    if not bitcoin or "usd" not in bitcoin:
+        raise ValueError(f"Unexpected response: {data}")
 
-    except Exception as e:
-        print("Network error:", e)
+    return float(bitcoin["usd"])
 
-    time.sleep(15)
+
+def main() -> None:
+    while True:
+        try:
+            price = fetch_price()
+            message = {
+                "price": price,
+                "timestamp": int(time.time()),
+                "source": "coingecko",
+                "symbol": "BTC",
+            }
+            producer.send(TOPIC_NAME, message)
+            producer.flush()
+            print(f"Sent: {price}")
+        except Exception as error:
+            print(f"Ingestion error: {error}")
+
+        time.sleep(POLL_INTERVAL_SECONDS)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,53 +1,58 @@
 import json
-import redis
-from kafka import KafkaConsumer
-import pandas as pd
 import os
+from collections import deque
 
-file_path = "./data/data.parquet"
+import redis
+from kafka import KafkaConsumer, KafkaProducer
 
-rows = []
+from feature_utils import build_feature_payload
 
-r = redis.Redis(host='localhost', port=6379, decode_responses=True)
 
+BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
+INPUT_TOPIC = os.getenv("KAFKA_TOPIC", "btc_price")
+OUTPUT_TOPIC = os.getenv("PROCESSED_TOPIC", "btc_price_processed")
+REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
+REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
+PRICE_BUFFER_SIZE = int(os.getenv("PRICE_BUFFER_SIZE", "60"))
+
+
+r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
 consumer = KafkaConsumer(
-    'btc_price',
-    bootstrap_servers='localhost:9092',
-    value_deserializer=lambda m: json.loads(m.decode('utf-8'))
+    INPUT_TOPIC,
+    bootstrap_servers=BOOTSTRAP_SERVERS,
+    group_id="stream-processing",
+    auto_offset_reset="earliest",
+    value_deserializer=lambda message: json.loads(message.decode("utf-8")),
+)
+producer = KafkaProducer(
+    bootstrap_servers=BOOTSTRAP_SERVERS,
+    value_serializer=lambda value: json.dumps(value).encode("utf-8"),
 )
 
-prev = None
-prev2 = None
+prices = deque(maxlen=PRICE_BUFFER_SIZE)
 
-for msg in consumer:
-    price = msg.value["price"]
 
-    rows.append({
-    "price": price
-    })
+def main() -> None:
+    for message in consumer:
+        payload = message.value
+        price = float(payload["price"])
+        timestamp = int(payload.get("timestamp", 0))
 
-    if len(rows) >= 5:
-        df = pd.DataFrame(rows)
+        prices.append(price)
+        r.set(
+            "last_actual_price",
+            json.dumps({"price": price, "timestamp": timestamp}),
+        )
 
-        if os.path.exists(file_path):
-            old = pd.read_parquet(file_path)
-            df = pd.concat([old, df])
+        feature_payload = build_feature_payload(prices, timestamp)
+        if feature_payload is None:
+            continue
 
-        df.to_parquet(file_path)
-        rows = []
+        r.set("btc_feature", json.dumps(feature_payload))
+        producer.send(OUTPUT_TOPIC, feature_payload)
+        producer.flush()
+        print(f"Feature: {feature_payload}")
 
-    if prev is not None and prev2 is not None:
-        ret = (price - prev) / prev
 
-        feature = {
-            "lag_1": prev,
-            "lag_2": prev2,
-            "return": ret
-        }
-
-        r.set("btc_feature", json.dumps(feature))
-
-        print("Feature:", feature)
-
-    prev2 = prev
-    prev = price
+if __name__ == "__main__":
+    main()

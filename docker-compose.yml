@@ -3,19 +3,111 @@ services:
     image: wurstmeister/zookeeper
     ports:
       - "2181:2181"
-    
+
   kafka:
     image: wurstmeister/kafka
     ports:
       - "9092:9092"
     environment:
-      KAFKA_ADVERTISED_HOST_NAME: localhost
+      KAFKA_ADVERTISED_HOST_NAME: kafka
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
-      KAFKA_CREATE_TOPICS: "btc_price:1:1"
+      KAFKA_CREATE_TOPICS: "btc_price:1:1,btc_price_processed:1:1"
     depends_on:
       - zookeeper
-    
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 9092 || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      
   redis:
     image: redis
     ports:
       - "6379:6379"
+
+  producer:
+    build: .
+    command: python producer.py
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    volumes:
+      - .:/app
+
+  consumer:
+    build: .
+    command: python consumer.py
+    depends_on:
+      kafka:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+    volumes:
+      - .:/app
+
+  sink:
+    build: .
+    command: python sink.py
+    depends_on:
+      kafka:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+    volumes:
+      - .:/app
+
+  serving:
+    build: .
+    command: uvicorn app:app --host 0.0.0.0 --port 8000
+    depends_on:
+      - redis
+    ports:
+      - "8000:8000"
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      MODEL_NAME: workspace.default.btc_model
+      MODEL_VERSION: 1
+      MODEL_FALLBACK_PATH: /app/artifacts/btc_model.joblib
+      MLFLOW_TRACKING_URI: databricks
+    volumes:
+      - .:/app
+
+  monitor:
+    build: .
+    command: python monitor.py
+    depends_on:
+      - serving
+      - redis
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      SERVING_URL: http://serving:8000
+    volumes:
+      - .:/app
+
+  training:
+    build: .
+    command: python training.py
+    depends_on:
+      - kafka
+    profiles:
+      - training
+    environment:
+      DATA_PATH: /app/data/raw.csv
+      MODEL_PATH: /app/artifacts/btc_model.joblib
+      MODEL_NAME: workspace.default.btc_model
+      MLFLOW_TRACKING_URI: databricks
+      MLFLOW_EXPERIMENT_NAME: /Shared/btc_model
+    volumes:
+      - .:/app
